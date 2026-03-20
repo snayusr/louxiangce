@@ -7,17 +7,51 @@ type Bindings = {
 
 const app = new Hono<{ Bindings: Bindings }>().basePath('/api');
 
-// --- 访客统计 ---
+// --- 核心优化：全局访客追踪拦截器 ---
+app.use('*', async (c, next) => {
+  // 获取访客 IP
+  const ip = c.req.header('cf-connecting-ip') || 'unknown';
+  try {
+    // 记录或更新访客最后在线时间
+    await c.env.DB.prepare(`
+      INSERT INTO visitors (ip, last_seen) 
+      VALUES (?, CURRENT_TIMESTAMP)
+      ON CONFLICT(ip) DO UPDATE SET last_seen = CURRENT_TIMESTAMP
+    `).bind(ip).run();
+  } catch (e) {
+    console.error('Visitor tracking error:', e);
+  }
+  await next();
+});
+
+// 健康检查
 app.get('/health', (c) => c.json({ status: "ok" }));
 
+// --- 统计接口优化 ---
 app.get('/stats', async (c) => {
   try {
+    // 1. 获取建站日期
     const startDateRow = await c.env.DB.prepare("SELECT value FROM settings WHERE key = 'start_date'").first<{ value: string }>();
+    
+    // 2. 获取累积唯一访客数 (按 IP 计数)
     const totalVisitorsCount = await c.env.DB.prepare("SELECT count(*) as count FROM visitors").first<{ count: number }>();
+    
+    // 3. 获取当前在线人数 (过去 5 分钟内有活动的 IP)
+    const onlineUsersCount = await c.env.DB.prepare("SELECT count(*) as count FROM visitors WHERE last_seen > datetime('now', '-5 minutes')").first<{ count: number }>();
+    
     const start = new Date(startDateRow?.value || Date.now());
-    const daysRunning = Math.ceil(Math.abs(Date.now() - start.getTime()) / 86400000);
-    return c.json({ daysRunning, totalVisitors: totalVisitorsCount?.count || 0, onlineUsers: 1 });
-  } catch (e) { return c.json({ daysRunning: 0, totalVisitors: 0, onlineUsers: 1 }); }
+    const now = new Date();
+    const diffTime = Math.abs(now.getTime() - start.getTime());
+    const daysRunning = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+    return c.json({
+      daysRunning,
+      totalVisitors: totalVisitorsCount?.count || 0,
+      onlineUsers: onlineUsersCount?.count || 1 // 至少显示自己在线
+    });
+  } catch (err) {
+    return c.json({ daysRunning: 0, totalVisitors: 0, onlineUsers: 1 });
+  }
 });
 
 // --- 登录与设置 ---
@@ -57,7 +91,7 @@ app.post('/categories', async (c) => {
   return c.json({ id: res.meta.last_row_id });
 });
 
-// --- 相册 (核心：读取长代码) ---
+// --- 相册 ---
 app.get('/albums', async (c) => {
   const { results: albums } = await c.env.DB.prepare("SELECT albums.*, categories.name as category_name FROM albums LEFT JOIN categories ON albums.category_id = categories.id ORDER BY sort_order DESC").all<any>();
   
@@ -80,7 +114,6 @@ app.get('/albums', async (c) => {
   return c.json(fullAlbums);
 });
 
-// 发布新相册
 app.post('/albums', async (c) => {
   const d = await c.req.json();
   const res = await c.env.DB.prepare("INSERT INTO albums (category_id, title, description, lat, lng, location_name) VALUES (?,?,?,?,?,?)").bind(d.category_id, d.title, d.description, d.lat, d.lng, d.location_name).run();
@@ -95,28 +128,16 @@ app.post('/albums', async (c) => {
   return c.json({ id });
 });
 
-// 修改相册 (补全了这部分逻辑)
 app.put('/albums/:id', async (c) => {
   const id = c.req.param('id');
   const d = await c.req.json();
-  
-  // 1. 更新基本资料
-  await c.env.DB.prepare(`
-    UPDATE albums 
-    SET category_id = ?, title = ?, description = ?, lat = ?, lng = ?, location_name = ?
-    WHERE id = ?
-  `).bind(d.category_id, d.title, d.description, d.lat, d.lng, d.location_name, id).run();
-
-  // 2. 先断开该相册所有旧照片的关联
+  await c.env.DB.prepare("UPDATE albums SET category_id=?, title=?, description=?, lat=?, lng=?, location_name=? WHERE id=?").bind(d.category_id, d.title, d.description, d.lat, d.lng, d.location_name, id).run();
   await c.env.DB.prepare("UPDATE album_media SET album_id = NULL WHERE album_id = ?").bind(id).run();
-
-  // 3. 重新关联当前相册里的照片
   if (d.media && Array.isArray(d.media)) {
     for (const m of d.media) {
       await c.env.DB.prepare("UPDATE album_media SET album_id = ? WHERE url = ?").bind(id, m.url).run();
     }
   }
-  
   return c.json({ success: true });
 });
 
@@ -129,7 +150,7 @@ app.delete('/albums/:id', async (c) => {
   return c.json({ success: true });
 });
 
-// --- 上传 (返回长代码) ---
+// --- 上传 ---
 app.post('/upload', async (c) => {
   try {
     const form = await c.req.parseBody();
@@ -148,7 +169,7 @@ app.post('/upload', async (c) => {
       
     return c.json({ url: dataUrl });
   } catch (err: any) {
-    return c.json({ error: "图片太大，请压缩后再上传" }, 500);
+    return c.json({ error: "上传失败，请确保图片小于 700KB" }, 500);
   }
 });
 
