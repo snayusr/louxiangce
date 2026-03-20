@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "./dist",
+    "noEmit": false,
+    "allowImportingTsExtensions": false, // Must be false when emitting
+    "emitDeclarationOnly": false,
+    "declaration": true,
+    "tsBuildInfoFile": "./dist/.tsbuildinfo",
+    "rootDir": ".",
+    "jsx": "react-jsx",
+    "target": "ES2022",
+    "lib": ["ES2022"]
+  },
+  "include": ["server.ts"],
+  "exclude": ["node_modules", "dist", "./src"]
+}
