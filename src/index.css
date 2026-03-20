@@ -1,0 +1,77 @@
+@import "tailwindcss";
+@import "react-quill-new/dist/quill.snow.css";
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;0,700;1,300;1,400;1,500;1,600;1,700&family=Inter:wght@300;400;500;600;700&display=swap');
+
+@theme {
+  --color-pink-primary: #ff85a2;
+  --color-pink-light: #fce4ec;
+  --color-pink-dark: #f06292;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Cormorant Garamond", serif;
+}
+
+body {
+  @apply bg-[#fff5f7] text-slate-800 font-sans;
+}
+
+.pink-gradient {
+  background: linear-gradient(135deg, #ff85a2 0%, #f06292 100%);
+}
+
+.glass-card {
+  @apply bg-white/80 backdrop-blur-md border border-white/20 shadow-sm;
+}
+
+@keyframes marquee {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+.animate-marquee {
+  display: inline-block;
+  animation: marquee 20s linear infinite;
+}
+
+@keyframes pulse-slow {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.8; transform: scale(0.98); }
+}
+
+.animate-pulse-slow {
+  animation: pulse-slow 4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes rotate-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.animate-rotate-slow {
+  animation: rotate-slow 20s linear infinite;
+}
+
+.circle-mask {
+  mask-image: radial-gradient(circle, black 50%, transparent 50%);
+  -webkit-mask-image: radial-gradient(circle, black 50%, transparent 50%);
+}
+
+/* Rich Text Content Styles */
+.prose .ql-video,
+.prose .ql-video-custom {
+  width: 100%;
+  max-height: 500px;
+  aspect-ratio: 16 / 9;
+  border-radius: 1.5rem;
+  margin: 1.5rem 0;
+  border: none;
+  background: #000;
+  object-fit: contain;
+}
+
+.prose img {
+  border-radius: 1.5rem;
+  margin: 1.5rem 0;
+  width: 100%;
+  height: auto;
+  object-fit: cover;
+}
