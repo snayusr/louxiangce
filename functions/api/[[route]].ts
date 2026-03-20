@@ -48,7 +48,8 @@ app.post('/login', async (c) => {
 
 // Settings API
 app.get('/settings', async (c) => {
-  const { results } = await c.env.DB.prepare("SELECT * * FROM settings").all<{ key: string, value: string }>();
+  // 修正了这里的 SQL 错误：删除了多余的 *
+  const { results } = await c.env.DB.prepare("SELECT * FROM settings").all<{ key: string, value: string }>();
   return c.json(results.reduce((acc, curr) => ({ ...acc, [curr.key]: curr.value }), {}));
 });
 
