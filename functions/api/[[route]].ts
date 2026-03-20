@@ -64,19 +64,19 @@ app.delete('/albums/:id', async (c) => {
 });
 
 // Upload API - 立即存入数据库
+// 请找到文件末尾的 app.post('/upload', ...) 部分，确保它是这样的：
 app.post('/upload', async (c) => {
   const form = await c.req.parseBody();
   const file = form['file'] as File;
   if (!file) return c.json({ error: "no file" }, 400);
   
   const filename = `${Date.now()}-${file.name}`;
-  const url = `/uploads/${filename}`;
+  const url = `/uploads/${filename}`; // 统一使用标准路径
   const buffer = await file.arrayBuffer();
   
+  // 存入数据库
   await c.env.DB.prepare("INSERT INTO album_media (url, type, data) VALUES (?, ?, ?)")
     .bind(url, file.type, new Uint8Array(buffer)).run();
     
   return c.json({ url });
 });
-
-export const onRequest = handle(app);
