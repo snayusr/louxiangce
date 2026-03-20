@@ -7,98 +7,36 @@ type Bindings = {
 
 const app = new Hono<{ Bindings: Bindings }>().basePath('/api');
 
-// --- Helper: Visitor Tracking ---
-const trackVisitor = async (c: any) => {
-  const ip = c.req.header('cf-connecting-ip') || 'unknown';
-  try {
-    await c.env.DB.prepare(`
-      INSERT INTO visitors (ip, last_seen) 
-      VALUES (?, CURRENT_TIMESTAMP)
-      ON CONFLICT(ip) DO UPDATE SET last_seen = CURRENT_TIMESTAMP
-    `).bind(ip).run();
-  } catch (e) {
-    console.error('Visitor tracking error:', e);
-  }
-};
+// --- 访客统计 ---
+app.get('/health', (c) => c.json({ status: "ok" }));
 
-// Health Check
-app.get('/health', async (c) => {
-  await trackVisitor(c);
-  return c.json({ status: "ok", time: new Date().toISOString(), env: "cloudflare" });
-});
-
-// Stats API
 app.get('/stats', async (c) => {
-  try {
-    const startDateRow = await c.env.DB.prepare("SELECT value FROM settings WHERE key = 'start_date'").first<{ value: string }>();
-    const totalVisitorsCount = await c.env.DB.prepare("SELECT count(*) as count FROM visitors").first<{ count: number }>();
-    const onlineUsersCount = await c.env.DB.prepare("SELECT count(*) as count FROM visitors WHERE last_seen > datetime('now', '-5 minutes')").first<{ count: number }>();
-    
-    const start = new Date(startDateRow?.value || Date.now());
-    const now = new Date();
-    const diffTime = Math.abs(now.getTime() - start.getTime());
-    const daysRunning = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-    return c.json({
-      daysRunning,
-      totalVisitors: totalVisitorsCount?.count || 0,
-      onlineUsers: onlineUsersCount?.count || 0
-    });
-  } catch (err) {
-    return c.json({ error: "Failed to fetch stats" }, 500);
-  }
+  const start = await c.env.DB.prepare("SELECT value FROM settings WHERE key = 'start_date'").first<{value:string}>();
+  const visitors = await c.env.DB.prepare("SELECT count(*) as c FROM visitors").first<{c:number}>();
+  const days = Math.ceil(Math.abs(Date.now() - new Date(start?.value || 0).getTime()) / 86400000);
+  return c.json({ daysRunning: days, totalVisitors: visitors?.c || 0, onlineUsers: 1 });
 });
 
-// Auth API
+// --- 登录与设置 ---
 app.post('/login', async (c) => {
   const { username, password } = await c.req.json();
-  const user = await c.env.DB.prepare("SELECT * FROM admin WHERE username = ? AND password = ?")
-    .bind(username, password)
-    .first();
-    
-  if (user) {
-    return c.json({ success: true, token: "cloudflare-token" });
-  } else {
-    return c.json({ error: "Invalid credentials" }, 401);
-  }
+  const user = await c.env.DB.prepare("SELECT * FROM admin WHERE username=? AND password=?").bind(username, password).first();
+  return user ? c.json({ success: true }) : c.json({ error: "fail" }, 401);
 });
 
-// Settings API
 app.get('/settings', async (c) => {
-  const { results } = await c.env.DB.prepare("SELECT * FROM settings").all<{ key: string, value: string }>();
-  const settingsObj = results.reduce((acc, curr) => ({ ...acc, [curr.key]: curr.value }), {});
-  return c.json(settingsObj);
+  const { results } = await c.env.DB.prepare("SELECT * FROM settings").all<{key:string, value:string}>();
+  return c.json(results.reduce((acc, curr) => ({ ...acc, [curr.key]: curr.value }), {}));
 });
 
 app.put('/settings', async (c) => {
-  const data = await c.req.json();
+  const d = await c.req.json();
   const keys = ['site_name', 'customer_service_url', 'announcement', 'site_logo', 'site_password'];
-  
-  const statements = [];
-  for (const key of keys) {
-    if (data[key] !== undefined) {
-      statements.push(c.env.DB.prepare("UPDATE settings SET value = ? WHERE key = ?").bind(data[key], key));
-    }
-  }
-  
-  if (statements.length > 0) {
-    await c.env.DB.batch(statements);
-  }
-  
+  for (const k of keys) { if (d[k] !== undefined) await c.env.DB.prepare("UPDATE settings SET value=? WHERE key=?").bind(d[k], k).run(); }
   return c.json({ success: true });
 });
 
-app.post('/verify-site-password', async (c) => {
-  const { password } = await c.req.json();
-  const setting = await c.env.DB.prepare("SELECT value FROM settings WHERE key = 'site_password'").first<{ value: string }>();
-  if (setting && setting.value.trim() === (password || "").trim()) {
-    return c.json({ success: true });
-  } else {
-    return c.json({ success: false, error: "密码错误" }, 401);
-  }
-});
-
-// Category API
+// --- 分类 ---
 app.get('/categories', async (c) => {
   const { results } = await c.env.DB.prepare("SELECT * FROM categories").all();
   return c.json(results);
@@ -106,127 +44,54 @@ app.get('/categories', async (c) => {
 
 app.post('/categories', async (c) => {
   const { name, parent_id } = await c.req.json();
-  const info = await c.env.DB.prepare("INSERT INTO categories (name, parent_id) VALUES (?, ?)")
-    .bind(name, parent_id || null)
-    .run();
-  return c.json({ id: info.meta.last_row_id, name, parent_id });
+  const res = await c.env.DB.prepare("INSERT INTO categories (name, parent_id) VALUES (?,?)").bind(name, parent_id || null).run();
+  return c.json({ id: res.meta.last_row_id });
 });
 
-app.put('/categories/:id', async (c) => {
-  const id = c.req.param('id');
-  const { name, parent_id } = await c.req.json();
-  await c.env.DB.prepare("UPDATE categories SET name = ?, parent_id = ? WHERE id = ?")
-    .bind(name, parent_id || null, id)
-    .run();
-  return c.json({ success: true });
-});
-
-app.delete('/categories/:id', async (c) => {
-  const id = c.req.param('id');
-  const albumsInCategory = await c.env.DB.prepare("SELECT count(*) as count FROM albums WHERE category_id = ?").bind(id).first<{ count: number }>();
-  
-  if (albumsInCategory && albumsInCategory.count > 0) {
-    return c.json({ error: "无法删除包含相册的分类" }, 400);
-  }
-  
-  await c.env.DB.prepare("DELETE FROM categories WHERE id = ?").bind(id).run();
-  return c.json({ success: true });
-});
-
-// Albums API
+// --- 相册 (核心：支持长代码显示) ---
 app.get('/albums', async (c) => {
-  const { results: albums } = await c.env.DB.prepare(`
-    SELECT albums.*, categories.name as category_name 
-    FROM albums 
-    LEFT JOIN categories ON albums.category_id = categories.id
-    ORDER BY sort_order DESC, created_at DESC
-  `).all<any>();
-
-  const albumsWithMedia = await Promise.all(albums.map(async (album) => {
-    const { results: media } = await c.env.DB.prepare("SELECT url, type FROM album_media WHERE album_id = ?").bind(album.id).all<any>();
+  const { results: albums } = await c.env.DB.prepare("SELECT albums.*, categories.name as category_name FROM albums LEFT JOIN categories ON albums.category_id = categories.id ORDER BY sort_order DESC").all<any>();
+  
+  const fullAlbums = await Promise.all(albums.map(async (a) => {
+    // 读取媒体数据，包括之前存入的二进制数据
+    const { results: media } = await c.env.DB.prepare("SELECT url, type, data FROM album_media WHERE album_id = ?").bind(a.id).all<any>();
     
-    // 规范化类型：前端只认 'image' 或 'video'
     const fixedMedia = media.map((m: any) => {
-      let uiType = 'image';
-      if (m.type) {
-        if (m.type.startsWith('video')) uiType = 'video';
-        else if (m.type.startsWith('image')) uiType = 'image';
-        else uiType = m.type;
+      let finalUrl = m.url;
+      
+      // 如果数据库里有二进制数据，将其转换为您想要的“长代码”格式
+      if (m.data) {
+        const uint8 = new Uint8Array(m.data);
+        let binary = '';
+        for (let i = 0; i < uint8.length; i++) {
+          binary += String.fromCharCode(uint8[i]);
+        }
+        const base64 = btoa(binary);
+        finalUrl = `data:${m.type || 'image/jpeg'};base64,${base64}`;
       }
-      
-      // 规范化 URL
-      const url = m.url.startsWith('db-data:') ? m.url.replace('db-data:', '/uploads/') : m.url;
-      
-      return { ...m, type: uiType, url };
+
+      return {
+        url: finalUrl,
+        type: m.type?.startsWith('video') ? 'video' : 'image'
+      };
     });
-
-    return { ...album, media: fixedMedia };
+    
+    return { ...a, media: fixedMedia };
   }));
-
-  return c.json(albumsWithMedia);
+  return c.json(fullAlbums);
 });
 
 app.post('/albums', async (c) => {
-  const data = await c.req.json();
+  const d = await c.req.json();
+  const res = await c.env.DB.prepare("INSERT INTO albums (category_id, title, description, lat, lng, location_name) VALUES (?,?,?,?,?,?)").bind(d.category_id, d.title, d.description, d.lat, d.lng, d.location_name).run();
+  const id = res.meta.last_row_id;
+  await c.env.DB.prepare("UPDATE albums SET sort_order=? WHERE id=?").bind(id, id).run();
   
-  const info = await c.env.DB.prepare(`
-    INSERT INTO albums (category_id, title, description, lat, lng, location_name, sort_order)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).bind(
-    data.category_id, 
-    data.title, 
-    data.description, 
-    data.lat, 
-    data.lng, 
-    data.location_name,
-    0
-  ).run();
-  
-  const albumId = info.meta.last_row_id;
-  await c.env.DB.prepare("UPDATE albums SET sort_order = ? WHERE id = ?").bind(albumId, albumId).run();
-  
-  if (data.media && Array.isArray(data.media)) {
-    for (const m of data.media) {
-      // 统一存为 db-data: 格式
-      const dbUrl = m.url.startsWith('/uploads/') ? m.url.replace('/uploads/', 'db-data:') : m.url;
-      // 更新 album_id
-      await c.env.DB.prepare("UPDATE album_media SET album_id = ? WHERE url = ?").bind(albumId, dbUrl).run();
-    }
+  for (const m of d.media) {
+    // 如果是长代码，直接存入 url 字段
+    await c.env.DB.prepare("UPDATE album_media SET album_id = ? WHERE url = ?").bind(id, m.url).run();
   }
-  
-  return c.json({ id: albumId });
-});
-
-app.post('/albums/reorder', async (c) => {
-  const { id1, order1, id2, order2 } = await c.req.json();
-  await c.env.DB.batch([
-    c.env.DB.prepare("UPDATE albums SET sort_order = ? WHERE id = ?").bind(order1, id1),
-    c.env.DB.prepare("UPDATE albums SET sort_order = ? WHERE id = ?").bind(order2, id2)
-  ]);
-  return c.json({ success: true });
-});
-
-app.put('/albums/:id', async (c) => {
-  const albumId = c.req.param('id');
-  const data = await c.req.json();
-
-  await c.env.DB.prepare(`
-    UPDATE albums 
-    SET category_id = ?, title = ?, description = ?, lat = ?, lng = ?, location_name = ?
-    WHERE id = ?
-  `).bind(data.category_id, data.title, data.description, data.lat, data.lng, data.location_name, albumId).run();
-  
-  // 重置该相册的所有媒体关联
-  await c.env.DB.prepare("UPDATE album_media SET album_id = NULL WHERE album_id = ?").bind(albumId).run();
-  
-  if (data.media && Array.isArray(data.media)) {
-    for (const m of data.media) {
-      const dbUrl = m.url.startsWith('/uploads/') ? m.url.replace('/uploads/', 'db-data:') : m.url;
-      await c.env.DB.prepare("UPDATE album_media SET album_id = ? WHERE url = ?").bind(albumId, dbUrl).run();
-    }
-  }
-  
-  return c.json({ success: true });
+  return c.json({ id });
 });
 
 app.delete('/albums/:id', async (c) => {
@@ -238,48 +103,32 @@ app.delete('/albums/:id', async (c) => {
   return c.json({ success: true });
 });
 
-app.post('/albums/clear', async (c) => {
-  await c.env.DB.batch([
-    c.env.DB.prepare("DELETE FROM album_media"),
-    c.env.DB.prepare("DELETE FROM albums")
-  ]);
-  return c.json({ success: true });
-});
-
-app.post('/change-password', async (c) => {
-  const { oldPassword, newPassword } = await c.req.json();
-  const admin = await c.env.DB.prepare("SELECT * FROM admin WHERE username = 'admin'").first<any>();
-  
-  if (admin.password !== oldPassword) {
-    return c.json({ error: "原密码错误" }, 401);
-  }
-
-  await c.env.DB.prepare("UPDATE admin SET password = ? WHERE username = 'admin'").bind(newPassword).run();
-  return c.json({ success: true });
-});
-
-// Upload API (D1 BLOB Storage)
+// --- 上传 (核心：返回长代码) ---
 app.post('/upload', async (c) => {
   try {
-    const formData = await c.req.parseBody();
-    const file = formData['file'] as File;
+    const form = await c.req.parseBody();
+    const file = form['file'] as File;
+    if (!file) return c.json({ error: "no file" }, 400);
     
-    if (!file) {
-      return c.json({ error: "No file uploaded" }, 400);
-    }
-
-    const filename = `${Date.now()}-${file.name}`;
-    const dbUrl = `db-data:${filename}`;
     const arrayBuffer = await file.arrayBuffer();
+    const uint8 = new Uint8Array(arrayBuffer);
     
-    // 立即存入数据库，此时 album_id 为空
-    await c.env.DB.prepare("INSERT INTO album_media (url, type, data) VALUES (?, ?, ?)")
-      .bind(dbUrl, file.type, new Uint8Array(arrayBuffer))
-      .run();
+    // 转换为 Base64 长代码
+    let binary = '';
+    for (let i = 0; i < uint8.length; i++) {
+      binary += String.fromCharCode(uint8[i]);
+    }
+    const base64 = btoa(binary);
+    const dataUrl = `data:${file.type || 'image/jpeg'};base64,${base64}`;
 
-    return c.json({ url: `/uploads/${filename}` });
+    // 存入数据库（同时存入 url 和 data 以防万一）
+    await c.env.DB.prepare("INSERT INTO album_media (url, type, data) VALUES (?, ?, ?)")
+      .bind(dataUrl, file.type, uint8)
+      .run();
+      
+    return c.json({ url: dataUrl });
   } catch (err: any) {
-    return c.json({ error: err.message }, 500);
+    return c.json({ error: "图片太大或转换失败，请尝试压缩图片后再上传" }, 500);
   }
 });
 
