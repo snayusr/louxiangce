@@ -53,7 +53,7 @@ app.post('/verify-site-password', async (c) => {
   return (s && s.value.trim() === (password || "").trim()) ? c.json({ success: true }) : c.json({ success: false }, 401);
 });
 
-// --- 分类管理 (优化版) ---
+// --- 分类管理 ---
 app.get('/categories', async (c) => {
   const { results } = await c.env.DB.prepare("SELECT * FROM categories").all();
   return c.json(results);
@@ -65,7 +65,6 @@ app.post('/categories', async (c) => {
   return c.json({ id: res.meta.last_row_id, name, parent_id });
 });
 
-// 新增：修改分类名称
 app.put('/categories/:id', async (c) => {
   const id = c.req.param('id');
   const { name } = await c.req.json();
@@ -73,22 +72,12 @@ app.put('/categories/:id', async (c) => {
   return c.json({ success: true });
 });
 
-// 优化：删除分类
 app.delete('/categories/:id', async (c) => {
   const id = c.req.param('id');
-  
-  // 1. 检查是否有相册关联
   const albums = await c.env.DB.prepare("SELECT count(*) as count FROM albums WHERE category_id = ?").bind(id).first<{ count: number }>();
-  if (albums && albums.count > 0) {
-    return c.json({ error: "该分类下已有相册，请先删除或移动相册后再删除分类" }, 400);
-  }
-
-  // 2. 检查是否有子分类
+  if (albums && albums.count > 0) return c.json({ error: "该分类下已有相册" }, 400);
   const subCats = await c.env.DB.prepare("SELECT count(*) as count FROM categories WHERE parent_id = ?").bind(id).first<{ count: number }>();
-  if (subCats && subCats.count > 0) {
-    return c.json({ error: "该分类下有子分类，请先删除子分类" }, 400);
-  }
-
+  if (subCats && subCats.count > 0) return c.json({ error: "该分类下有子分类" }, 400);
   await c.env.DB.prepare("DELETE FROM categories WHERE id = ?").bind(id).run();
   return c.json({ success: true });
 });
@@ -117,9 +106,24 @@ app.post('/albums', async (c) => {
   const d = await c.req.json();
   const res = await c.env.DB.prepare("INSERT INTO albums (category_id, title, description, lat, lng, location_name) VALUES (?,?,?,?,?,?)").bind(d.category_id, d.title, d.description, d.lat, d.lng, d.location_name).run();
   const id = res.meta.last_row_id;
+  // 初始排序值设为 ID
   await c.env.DB.prepare("UPDATE albums SET sort_order=? WHERE id=?").bind(id, id).run();
   if (d.media) { for (const m of d.media) { await c.env.DB.prepare("UPDATE album_media SET album_id = ? WHERE url = ?").bind(id, m.url).run(); } }
   return c.json({ id });
+});
+
+// --- 核心补全：相册排序交换接口 ---
+app.post('/albums/reorder', async (c) => {
+  const { id1, order1, id2, order2 } = await c.req.json();
+  try {
+    await c.env.DB.batch([
+      c.env.DB.prepare("UPDATE albums SET sort_order = ? WHERE id = ?").bind(order1, id1),
+      c.env.DB.prepare("UPDATE albums SET sort_order = ? WHERE id = ?").bind(order2, id2)
+    ]);
+    return c.json({ success: true });
+  } catch (err) {
+    return c.json({ error: "排序更新失败" }, 500);
+  }
 });
 
 app.put('/albums/:id', async (c) => {
